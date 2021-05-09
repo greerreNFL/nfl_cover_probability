@@ -17,7 +17,10 @@ pbp_filepath = 'A LOCAL FILEPATH WHERE YOUR PBP DATA LIVES. YOU CAN ALSO READ TH
 pbp_df = pd.read_csv(pbp_filepath, low_memory=False, index_col=0)
 
 
+
+
 ## create some new variables for the model ##
+## most features taken directly from nflfastR ##
 
 ## SPREAD_LINE_DIFFERENTIAL ##
 ## instead of a point differential, use a spread line differential ##
@@ -31,6 +34,27 @@ pbp_df['spread_line_differential'] = numpy.where(
         numpy.nan
     )
 )
+
+## elapsed share, spread_time, and Diff_Time_Ratio are all custom features from nflfastR's model ##
+## https://raw.githubusercontent.com/mrcaseb/nflfastR/master/R/helper_add_ep_wp.R ##
+
+## elapsed share ##
+pbp_df['elapsed_share'] = (
+    (3600 - pbp_df['game_seconds_remaining']) / 
+    3600
+)
+
+pbp_df['posteam_spread'] = numpy.where(
+    pbp_df['posteam_type'] == 'home',
+    pbp_df['spread_line'],
+    -1 * pbp_df['spread_line']
+)
+
+## spread_time ##
+pbp_df['spread_time'] = pbp_df['posteam_spread'] * numpy.exp(-4 * pbp_df['elapsed_share'])
+
+## Diff_Time_Ratio ##
+pbp_df['diff_time_ratio'] = pbp_df['score_differential'] / numpy.exp(-4 * pbp_df['elapsed_share'])
 
 
 ## RECEIVE_2H_KO ##
@@ -109,21 +133,22 @@ model_df = pbp_df[[
     'season',
     ## dependent var ##
     'cover_result',
-    ## independent vars ##
-    'spread_line',
+    ## independent vars from WP model ##
+    'spread_time',
     'score_differential',
-    'spread_line_differential',
+    'diff_time_ratio',
     'posteam_is_home',
     'half_seconds_remaining',
     'game_seconds_remaining',
-    'ep',
     'down',
     'ydstogo',
     'yardline_100',
     'posteam_timeouts_remaining',
     'defteam_timeouts_remaining',
     'receive_2h_ko',
-    'is_pat'
+    ## new features for CP model ##
+    'is_pat',
+    'spread_line_differential',
 ]].copy()
 
 ## remove NAs ##
@@ -195,33 +220,49 @@ clf_xgb.fit(
 ## Round 1 ##
 param_grid = {
     'max_depth' : [3, 4, 5],
-    'learning_rate' : [0.1, 0.01, 0.05],
-    'gamma' : [0, 0.25, 1.0],
-    'reg_lambda' : [0, 1, 10]
+    'learning_rate' : [0.1, 0.05, 0.01],
+    'gamma' : [0, 0.25, .5],
+    'reg_lambda' : [10, 12, 15],
+    'n_estimators' : [100, 500, 1000],
 }
 
 ## Round 1 Results ##
-## {'gamma': 0.25, 'learning_rate': 0.1, 'max_depth': 5, 'reg_lambda': 10}
+## {'gamma': 0.25, 'learning_rate': 0.01, 'max_depth': 5, 'n_estimators': 1000, 'reg_lambda': 10}
 
 ## Round 2 ##
 param_grid = {
     'max_depth' : [5, 6, 7],
-    'learning_rate' : [0.20, 0.15, 0.10],
-    'gamma' : [0.25],
-    'reg_lambda' : [10, 20, 30]
+    'learning_rate' : [0.005, 0.01, 0.025],
+    'gamma' : [.25],
+    'reg_lambda' : [6, 8, 10],
+    'n_estimators' : [1000, 1250, 1500],
 }
-## {'gamma': 0.25, 'learning_rate': 0.1, 'max_depth': 5, 'reg_lambda': 10}
+
+## {'gamma': 0.25, 'learning_rate': 0.01, 'max_depth': 5, 'n_estimators': 1000, 'reg_lambda': 6}
+
+
+## Round 3 ##
+param_grid = {
+    'max_depth' : [5],
+    'learning_rate' : [0.01],
+    'gamma' : [.25],
+    'reg_lambda' : [2, 4, 6],
+    'n_estimators' : [1000, 1125],
+}
+
+## {'gamma': 0.25, 'learning_rate': 0.01, 'max_depth': 5, 'n_estimators': 1000, 'reg_lambda': 6}
+
 
 ## set up grid search ##
 optimal_params = GridSearchCV(
     estimator=xgb.XGBClassifier(
         objective='binary:logistic',
         subsample=0.9,
-        colsample_bytree=0.5
+        colsample_bytree=0.75
     ),
     param_grid=param_grid,
     scoring='roc_auc',
-    verbose=2,
+    verbose=0,
     cv=3
 )
 
@@ -238,8 +279,9 @@ clf_xgb = xgb.XGBClassifier(
     objective='binary:logistic',
     gamma=0.25,
     max_depth=5,
-    reg_lambda=10,
-    learning_rate=0.1
+    reg_lambda=6,
+    learning_rate=0.01,
+    n_estimators=1000
 )
 
 clf_xgb.fit(
